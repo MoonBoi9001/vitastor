@@ -3,6 +3,22 @@
 
 #include "blockstore_impl.h"
 
+// Performance debugging for issue #114
+#define PERF_DEBUG_WRITES 1
+
+#if PERF_DEBUG_WRITES
+#include <time.h>
+static inline uint64_t get_time_us()
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return ts.tv_sec * 1000000 + ts.tv_nsec / 1000;
+}
+#define PERF_LOG(fmt, ...) fprintf(stderr, "[PERF] " fmt "\n", ##__VA_ARGS__)
+#else
+#define PERF_LOG(fmt, ...)
+#endif
+
 bool blockstore_impl_t::enqueue_write(blockstore_op_t *op)
 {
     // Check or assign version number
@@ -245,10 +261,18 @@ void blockstore_impl_t::cancel_all_writes(blockstore_op_t *op, blockstore_dirty_
 // First step of the write algorithm: dequeue operation and submit initial write(s)
 int blockstore_impl_t::dequeue_write(blockstore_op_t *op)
 {
+#if PERF_DEBUG_WRITES
+    uint64_t t_start = 0;
+#endif
     if (PRIV(op)->op_state)
     {
         return continue_write(op);
     }
+#if PERF_DEBUG_WRITES
+    t_start = get_time_us();
+    PERF_LOG("dequeue_write START oid=%jx:%jx offset=%u len=%u",
+        op->oid.inode, op->oid.stripe, op->offset, op->len);
+#endif
     auto dirty_it = dirty_db.find((obj_ver_id){
         .oid = op->oid,
         .version = op->version,
@@ -300,11 +324,13 @@ int blockstore_impl_t::dequeue_write(blockstore_op_t *op)
     }
     if ((dirty_it->second.state & BS_ST_TYPE_MASK) == BS_ST_BIG_WRITE)
     {
+        PERF_LOG("BIG_WRITE path for oid=%jx:%jx", op->oid.inode, op->oid.stripe);
         blockstore_journal_check_t space_check(this);
         if (!space_check.check_available(op, unsynced_big_write_count + 1,
             sizeof(journal_entry_big_write) + dsk.clean_dyn_size,
             (unstable_writes.size()+unstable_unsynced+((dirty_it->second.state & BS_ST_INSTANT) ? 0 : 1))*journal.block_size))
         {
+            PERF_LOG("WAIT_JOURNAL for oid=%jx:%jx (no journal space)", op->oid.inode, op->oid.stripe);
             return 0;
         }
         // Big (redirect) write
@@ -317,6 +343,7 @@ int blockstore_impl_t::dequeue_write(blockstore_op_t *op)
                 // hope that some space will be available after flush
                 flusher->request_trim();
                 PRIV(op)->wait_for = WAIT_FREE;
+                PERF_LOG("WAIT_FREE for oid=%jx:%jx (no free data blocks)", op->oid.inode, op->oid.stripe);
                 return 0;
             }
             cancel_all_writes(op, dirty_it, -ENOSPC);
@@ -387,6 +414,7 @@ int blockstore_impl_t::dequeue_write(blockstore_op_t *op)
     else /* if ((dirty_it->second.state & BS_ST_TYPE_MASK) == BS_ST_SMALL_WRITE) */
     {
         // Small (journaled) write
+        PERF_LOG("SMALL_WRITE path for oid=%jx:%jx", op->oid.inode, op->oid.stripe);
         // First check if the journal has sufficient space
         uint64_t dyn_size = dsk.dirty_dyn_size(op->offset, op->len);
         blockstore_journal_check_t space_check(this);
@@ -397,6 +425,7 @@ int blockstore_impl_t::dequeue_write(blockstore_op_t *op)
                 sizeof(journal_entry_small_write) + dyn_size,
                 op->len + (unstable_writes.size()+unstable_unsynced+((dirty_it->second.state & BS_ST_INSTANT) ? 0 : 1))*journal.block_size))
         {
+            PERF_LOG("WAIT_JOURNAL for oid=%jx:%jx (small write, no journal space)", op->oid.inode, op->oid.stripe);
             return 0;
         }
         // There is sufficient space. Check SQE(s)
@@ -523,6 +552,11 @@ int blockstore_impl_t::dequeue_write(blockstore_op_t *op)
             PRIV(op)->op_state = 3;
         }
     }
+#if PERF_DEBUG_WRITES
+    uint64_t t_end = get_time_us();
+    PERF_LOG("dequeue_write END oid=%jx:%jx elapsed=%lu us",
+        op->oid.inode, op->oid.stripe, (unsigned long)(t_end - t_start));
+#endif
     return 1;
 }
 
