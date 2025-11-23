@@ -189,12 +189,22 @@ bool blockstore_impl_t::enqueue_write(blockstore_op_t *op)
     }
     // Calculate checksums
     // FIXME: Allow to receive checksums from outside?
+#if PERF_DEBUG_WRITES
+    uint64_t t_csum_start = 0;
+    if (!is_del && dsk.data_csum_type && op->len > 0)
+        t_csum_start = get_time_us();
+#endif
     if (!is_del && dsk.data_csum_type && op->len > 0)
     {
         uint32_t *data_csums = (uint32_t*)(dyn_ptr + dsk.clean_entry_bitmap_size);
         uint32_t start = op->offset / dsk.csum_block_size;
         uint32_t end = (op->offset+op->len-1) / dsk.csum_block_size;
         auto fn = state & BS_ST_BIG_WRITE ? crc32c_pad : crc32c_nopad;
+#if PERF_DEBUG_WRITES
+        PERF_LOG("Checksum calc: oid=%jx:%jx len=%u blocks=%u-%u fn=%s",
+            op->oid.inode, op->oid.stripe, op->len, start, end,
+            (state & BS_ST_BIG_WRITE) ? "pad" : "nopad");
+#endif
         if (start == end)
             data_csums[0] = fn(0, op->buf, op->len, op->offset - start*dsk.csum_block_size, (end+1)*dsk.csum_block_size - (op->offset+op->len));
         else
@@ -211,6 +221,14 @@ bool blockstore_impl_t::enqueue_write(blockstore_op_t *op)
                 0, (end+1)*dsk.csum_block_size - (op->offset+op->len)
             );
         }
+#if PERF_DEBUG_WRITES
+        if (t_csum_start > 0)
+        {
+            uint64_t t_csum_end = get_time_us();
+            PERF_LOG("Checksum DONE: oid=%jx:%jx elapsed=%lu us",
+                op->oid.inode, op->oid.stripe, (unsigned long)(t_csum_end - t_csum_start));
+        }
+#endif
     }
     dirty_db.emplace((obj_ver_id){
         .oid = op->oid,
