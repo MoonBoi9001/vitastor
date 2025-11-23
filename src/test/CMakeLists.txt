@@ -34,6 +34,11 @@ add_executable(test_allocator EXCLUDE_FROM_ALL test_allocator.cpp ../util/alloca
 add_dependencies(build_tests test_allocator)
 add_test(NAME test_allocator COMMAND test_allocator)
 
+# test_checksum_padding
+add_executable(test_checksum_padding EXCLUDE_FROM_ALL test_checksum_padding.cpp)
+add_dependencies(build_tests test_checksum_padding)
+add_test(NAME test_checksum_padding COMMAND test_checksum_padding)
+
 # test_cas
 add_executable(test_cas
 	test_cas.cpp
